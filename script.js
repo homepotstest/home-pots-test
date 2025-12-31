@@ -44,6 +44,30 @@ function formatMsToMmSs(ms) {
     return `${minutes}:${seconds.toString().padStart(2, '0')}`;
 }
 
+// Helper: Calculate 5-value rolling average for heart rate data
+function calculateRollingAverages(data) {
+    const window = 5;
+    return data.map((entry, index) => {
+        if (entry.leadsOff || entry.value === null || entry.value === undefined) {
+            return { ...entry, rollingAverage: null };
+        }
+        
+        // Get the window of values: current index and up to 4 previous values
+        const startIndex = Math.max(0, index - window + 1);
+        const windowValues = data
+            .slice(startIndex, index + 1)
+            .filter(d => d.value !== null && d.value !== undefined && !d.leadsOff)
+            .map(d => d.value);
+        
+        if (windowValues.length === 0) {
+            return { ...entry, rollingAverage: null };
+        }
+        
+        const average = windowValues.reduce((sum, val) => sum + val, 0) / windowValues.length;
+        return { ...entry, rollingAverage: average };
+    });
+}
+
 // --- 1. Bluetooth Connection Logic ---
 document.getElementById('connectBtn').addEventListener('click', async () => {
     try {
@@ -352,11 +376,16 @@ document.getElementById('startBtn').addEventListener('click', () => {
 document.getElementById('downloadCsv').addEventListener('click', () => {
     if (dataLog.length === 0) return alert("No data logged yet!");
 
+    // Calculate rolling averages
+    const dataWithAverages = calculateRollingAverages(dataLog);
+
     // Include position column (may be empty if not provided). Mark LEADS_OFF rows explicitly.
-    const csvContent = "Time,Value,Position\n" + dataLog.map(e => {
+    // Use rolling average instead of instantaneous value
+    const csvContent = "Time,Value,Rolling_Avg_5,Position\n" + dataWithAverages.map(e => {
         const val = e.leadsOff ? 'LEADS_OFF' : (e.value === null || e.value === undefined ? '' : e.value);
+        const avg = e.leadsOff ? 'LEADS_OFF' : (e.rollingAverage === null ? '' : e.rollingAverage.toFixed(2));
         const pos = (e.position === null || e.position === undefined) ? '' : e.position;
-        return `${e.time},${val},${pos}`;
+        return `${e.time},${val},${avg},${pos}`;
     }).join("\n");
     const blob = new Blob([csvContent], { type: 'text/csv' });
     const url = window.URL.createObjectURL(blob);
@@ -454,9 +483,13 @@ document.getElementById('downloadPdf').addEventListener('click', async () => {
             // Prefer explicit testStartTime; if missing, prefer first entry's timestampMs when available,
             // otherwise fall back to Date.now() to avoid producing NaN windows.
             startMs = testStartTime || (dataLog.length > 0 && dataLog[0].timestampMs ? dataLog[0].timestampMs : Date.now());
-            const labels = dataLog.map(d => ((d.timestampMs - startMs) / 60000).toFixed(2));
-            const heartRateData = dataLog.map(d => d.value);
-            const postureData = dataLog.map(d => (d.position === null || d.position === undefined) ? null : d.position);
+            
+            // Calculate rolling averages for the chart
+            const dataWithAverages = calculateRollingAverages(dataLog);
+            
+            const labels = dataWithAverages.map(d => ((d.timestampMs - startMs) / 60000).toFixed(2));
+            const heartRateData = dataWithAverages.map(d => d.rollingAverage); // Use rolling average instead of raw value
+            const postureData = dataWithAverages.map(d => (d.position === null || d.position === undefined) ? null : d.position);
 
             chartInstance = new Chart(canvas, {
                 type: 'line',
@@ -647,3 +680,5 @@ The results of this test did not meet the diagnostic criteria for POTS. The diag
             canvas.height = origHeight;
         }
 });
+
+
