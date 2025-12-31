@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>POTS Test Bluetooth Reporter</title>
+
+    <style>
+        * { box-sizing: border-box; }
+        body { 
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; 
+            text-align: center; 
+            padding: 20px; 
+            background: #f0f2f5; 
+            margin: 0;
+        }
+        .container { 
+            background: white; 
+            padding: 20px; 
+            border-radius: 12px; 
+            box-shadow: 0 4px 10px rgba(0,0,0,0.1); 
+            max-width: 600px;
+            margin: 0 auto;
+            width: 100%;
+        }
+        h2 { margin-top: 0; margin-bottom: 20px; font-size: 24px; }
+        button { 
+            padding: 12px 16px; 
+            margin: 8px 0; 
+            cursor: pointer; 
+            font-size: 14px; 
+            border: none; 
+            border-radius: 6px; 
+            transition: 0.2s; 
+            width: 100%;
+            max-width: 100%;
+        }
+        #connectBtn { background: #007bff; color: white; }
+        #startBtn { background: #6c757d; color: white; }
+        #downloadCsv { background: #28a745; color: white; }
+        #downloadPdf { background: #dc3545; color: white; }
+        button:hover { opacity: 0.85; }
+        button:active { transform: scale(0.98); }
+        #status { 
+            font-weight: bold; 
+            margin-top: 15px; 
+            margin-bottom: 10px;
+            color: #666; 
+            font-size: 13px; 
+            word-wrap: break-word;
+        }
+        #postureInstruction { 
+            font-size: 28px; 
+            font-weight: bold; 
+            margin-top: 15px; 
+            padding: 15px; 
+            border-radius: 8px; 
+            transition: all 0.3s ease; 
+            word-wrap: break-word;
+        }
+        
+        /* Tablet and larger screens */
+        @media (min-width: 768px) {
+            body { padding: 40px; }
+            .container { padding: 30px; }
+            h2 { font-size: 28px; }
+            button { padding: 12px 24px; font-size: 15px; }
+            #status { font-size: 14px; }
+            #postureInstruction { font-size: 32px; padding: 20px; }
+        }
+    </style>
+</head>
+<body>
+
+    <div class="container">
+        <h2>POTS Test Data Portal</h2>
+        <button id="connectBtn">1. Connect to Device</button>
+        <button id="startBtn">2. Start Test</button>
+        <button id="downloadCsv">3. Export CSV</button>
+        <button id="downloadPdf">4. Export PDF Report</button>
+        <p id="status">Status: Disconnected</p>
+        <div id="postureInstruction" style="display: none;"></div>
+    </div>
+
+    <!-- Hidden canvas used ONLY for generating the PDF image -->
+    <div style="display:none;">
+        <canvas id="hiddenChartCanvas" width="1200" height="600"></canvas>
+    </div>
+
+    <!-- 1. The PDF Engine (jsPDF) - Must come before your script -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+
+    <!-- 2. The Graphing Engine (Chart.js) - Needed for the report visualization -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@3.9.1"></script>
+
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/crypto-js/4.1.1/crypto-js.min.js"></script>
+
+    <!-- 3. Helper Script to fix the library name for your code -->
+    <script>
+        // This ensures that "jsPDF" is a simple command your code can find
+        window.onload = function() {
+            if (window.jspdf && window.jspdf.jsPDF) {
+                window.jsPDF = window.jspdf.jsPDF;
+            }
+        };
+    </script>
+    
+    <script src="script.js"></script>
+</body>
+</html>
+
