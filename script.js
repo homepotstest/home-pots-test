@@ -1,9 +1,10 @@
 // UUIDs must match your Device code
 const SERVICE_UUID = "19b10000-e8f2-537e-4f6c-d104768a1214";
 const CHARACTERISTIC_UUID = "19b10001-e8f2-537e-4f6c-d104768a1214";
+const PASSWORD_CHARACTERISTIC_UUID = "19b10002-e8f2-537e-4f6c-d104768a1214";
 
-// NOTE: BLE encryption is handled via bonding when connecting to an encrypted characteristic.
-// User must provide the encryption key which matches the ESP32's AES_KEY.
+// NOTE: BLE encryption is handled at the connection level (Secure Connection)
+// No application-level encryption key is needed
 
 let dataLog = []; 
 let isTestActive = false;
@@ -14,7 +15,15 @@ const statusText = document.getElementById('status');
 const postureInstruction = document.getElementById('postureInstruction');
 let connectedDevice = null;
 let characteristicRef = null;
-let userProvidedAesKey = null; // User-provided encryption key (hex format)
+let passwordCharacteristicRef = null;
+let isAuthenticated = false;
+let storedPassword = null; // Store password after first authentication for reconnects
+
+// Function to reset stored password (for switching devices or testing different passwords)
+function clearStoredPassword() {
+    storedPassword = null;
+    console.log('Stored password cleared. Next connection will prompt for password again.');
+}
 
 // Runtime debug flags (visible overlay) - COMMENTED OUT
 // let debugFlags = { lastRaw: '', lastParseStep: '', lastError: '', receivedCount: 0 };
@@ -69,27 +78,27 @@ function calculateRollingAverages(data) {
     });
 }
 
-// --- 0. Encryption Key Input ---
-function showEncryptionKeyDialog() {
+// --- 0. Password Input Dialog ---
+function showPasswordDialog() {
     return new Promise((resolve) => {
         const dialogDiv = document.createElement('div');
         dialogDiv.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;z-index:10000;';
         
         const contentDiv = document.createElement('div');
-        contentDiv.style.cssText = 'background:white;padding:30px;border-radius:8px;max-width:500px;box-shadow:0 4px 20px rgba(0,0,0,0.3);';
+        contentDiv.style.cssText = 'background:white;padding:30px;border-radius:8px;max-width:400px;box-shadow:0 4px 20px rgba(0,0,0,0.3);';
         
         const titleEl = document.createElement('h3');
-        titleEl.textContent = 'Enter Encryption Key';
+        titleEl.textContent = 'Enter Device Password';
         titleEl.style.cssText = 'margin-top:0;margin-bottom:15px;';
         
         const instructionsEl = document.createElement('p');
-        instructionsEl.textContent = 'Enter the AES-128 encryption key in hexadecimal format (32 hex characters for 16 bytes). Example: 020701080208010802080B0A0D0C0F0E';
+        instructionsEl.textContent = 'Enter the password displayed on the device to authenticate.';
         instructionsEl.style.cssText = 'margin-bottom:15px;font-size:14px;color:#666;';
         
         const inputEl = document.createElement('input');
-        inputEl.type = 'text';
-        inputEl.placeholder = '32 hex characters (no spaces)';
-        inputEl.style.cssText = 'width:100%;padding:10px;border:1px solid #ccc;border-radius:4px;font-family:monospace;margin-bottom:15px;box-sizing:border-box;';
+        inputEl.type = 'password';
+        inputEl.placeholder = 'Device password';
+        inputEl.style.cssText = 'width:100%;padding:10px;border:1px solid #ccc;border-radius:4px;margin-bottom:15px;box-sizing:border-box;';
         
         const errorEl = document.createElement('div');
         errorEl.style.cssText = 'color:#dc3545;font-size:13px;margin-bottom:15px;display:none;';
@@ -106,17 +115,11 @@ function showEncryptionKeyDialog() {
         };
         
         const confirmBtn = document.createElement('button');
-        confirmBtn.textContent = 'Connect';
+        confirmBtn.textContent = 'Authenticate';
         confirmBtn.style.cssText = 'padding:10px 20px;background:#007bff;color:white;border:none;border-radius:4px;cursor:pointer;';
         confirmBtn.onclick = () => {
-            const keyValue = inputEl.value.trim().toUpperCase();
-            if (!/^[0-9A-F]{32}$/.test(keyValue)) {
-                errorEl.textContent = 'Invalid format! Must be 32 hexadecimal characters.';
-                errorEl.style.display = 'block';
-                return;
-            }
             dialogDiv.remove();
-            resolve(keyValue);
+            resolve(inputEl.value);
         };
         
         inputEl.onkeypress = (e) => {
@@ -138,20 +141,8 @@ function showEncryptionKeyDialog() {
         inputEl.focus();
     });
 }
-
-// --- 1. Bluetooth Connection Logic ---
 document.getElementById('connectBtn').addEventListener('click', async () => {
     try {
-        statusText.innerText = "Status: Asking for encryption key...";
-        
-        // Get encryption key from user
-        const keyHex = await showEncryptionKeyDialog();
-        if (!keyHex) {
-            statusText.innerText = 'Status: Connection cancelled.';
-            return;
-        }
-        
-        userProvidedAesKey = keyHex;
         statusText.innerText = "Status: Searching for Device...";
 
         const device = await navigator.bluetooth.requestDevice({
@@ -161,34 +152,45 @@ document.getElementById('connectBtn').addEventListener('click', async () => {
         connectedDevice = device;
         // monitor disconnects
         device.addEventListener('gattserverdisconnected', () => {
-            // debugFlags.lastParseStep = 'gatt_disconnected';
-            // debugFlags.lastError = 'Device disconnected';
-            // updateDebugUI();
+            isAuthenticated = false;
             statusText.innerText = 'Status: Device disconnected. Attempting reconnect...';
             // attempt reconnect in background
             attemptReconnect();
         });
 
         const server = await device.gatt.connect();
-        statusText.innerText = "Status: Connected! Initiating bonding...";
+        statusText.innerText = "Status: Connected! Getting service...";
         
         const service = await server.getPrimaryService(SERVICE_UUID);
         const characteristic = await service.getCharacteristic(CHARACTERISTIC_UUID);
-
-        // Trigger bonding by reading the characteristic with encryption
-        // This will prompt the user for pairing if not already bonded
-        try {
-            await characteristic.readValue();
-        } catch (e) {
-            // Bonding/pairing prompt may appear here - this is expected
-            console.log('Bonding/pairing initiated:', e.message);
+        const passwordCharacteristic = await service.getCharacteristic(PASSWORD_CHARACTERISTIC_UUID);
+        
+        // Get password from user (only if not already stored)
+        let password = storedPassword;
+        if (!password) {
+            password = await showPasswordDialog();
+            if (!password) {
+                statusText.innerText = 'Status: Authentication cancelled.';
+                device.gatt.disconnect();
+                return;
+            }
+            storedPassword = password; // Store for future reconnects
         }
         
+        // Send password for authentication
+        statusText.innerText = "Status: Authenticating...";
+        await passwordCharacteristic.writeValue(new TextEncoder().encode(password));
+        
+        // Wait for ESP32 to process password
+        await new Promise(r => setTimeout(r, 500));
+        
+        isAuthenticated = true;
         await characteristic.startNotifications();
-        statusText.innerText = "Status: Connected and bonded. Press 'Start Test' to begin logging data...";
+        statusText.innerText = "Status: Authenticated! Press 'Start Test' to begin logging data...";
 
         // attach handler and keep reference
         characteristicRef = characteristic;
+        passwordCharacteristicRef = passwordCharacteristic;
         characteristic.addEventListener('characteristicvaluechanged', handleCharacteristicValueChanged);
 
     } catch (err) {
@@ -235,28 +237,14 @@ function decryptAES128(hexCiphertext) {
 function handleCharacteristicValueChanged(event) {
     try {
         if (!isTestActive) return; // Only log if test is active
-        if (!userProvidedAesKey) {
-            console.warn('Received data but no encryption key is set');
+        if (!isAuthenticated) {
+            console.warn('Received data but not authenticated');
             return;
         }
 
-        // Decode BLE data (now encrypted)
-        const rawBytes = event.target.value;
-        console.log("Raw bytes length:", rawBytes.byteLength);
-        console.log("Raw bytes:", new Uint8Array(rawBytes));
-        
-        const encryptedHex = new TextDecoder().decode(event.target.value).trim();
-        console.log("Encrypted hex string:", encryptedHex);
-
-        // Decrypt the data
-        const decodedData = decryptAES128(encryptedHex);
-        if (!decodedData) {
-            // debugFlags.lastParseStep = 'decryption_failed';
-            // debugFlags.lastError = 'AES decryption failed';
-            // debugFlags.lastRaw = encryptedHex;  // Show what we tried to decrypt
-            // updateDebugUI();
-            return;
-        }
+        // Decode BLE data (plaintext - encrypted at connection level)
+        const decodedData = new TextDecoder().decode(event.target.value).trim();
+        console.log("Received data:", decodedData);
 
         // update debug flags immediately
         // debugFlags.lastRaw = decodedData;
@@ -383,7 +371,7 @@ function handleCharacteristicValueChanged(event) {
 
 // Attempt reconnect with exponential backoff (faster than linear)
 async function attemptReconnect(maxAttempts = 10) {
-    if (!connectedDevice || !userProvidedAesKey) return;
+    if (!connectedDevice) return;
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
         try {
             // debugFlags.lastParseStep = `reconnect_attempt_${attempt}`;
@@ -391,9 +379,30 @@ async function attemptReconnect(maxAttempts = 10) {
             const server = await connectedDevice.gatt.connect();
             const service = await server.getPrimaryService(SERVICE_UUID);
             const characteristic = await service.getCharacteristic(CHARACTERISTIC_UUID);
+            const passwordCharacteristic = await service.getCharacteristic(PASSWORD_CHARACTERISTIC_UUID);
             
-            // Skip bonding read on reconnect (already bonded) to save time
-            // Only do it on first connection (which is in the connect handler)
+            // Re-authenticate on reconnect using stored password
+            if (!storedPassword) {
+                connectedDevice.gatt.disconnect();
+                statusText.innerText = 'Status: Reconnect failed - no stored password. Please reconnect manually.';
+                return;
+            }
+            
+            const password = storedPassword;
+            
+            try {
+                await passwordCharacteristic.writeValue(new TextEncoder().encode(password));
+                // Small delay to allow ESP32 to process password
+                await new Promise(r => setTimeout(r, 500));
+                
+                isAuthenticated = true;
+            } catch (authErr) {
+                console.error('Authentication error on reconnect:', authErr);
+                connectedDevice.gatt.disconnect();
+                statusText.innerText = 'Status: Authentication error on reconnect.';
+                isAuthenticated = false;
+                return;
+            }
             
             await characteristic.startNotifications();
             characteristicRef = characteristic;
