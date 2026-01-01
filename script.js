@@ -381,8 +381,8 @@ function handleCharacteristicValueChanged(event) {
     }
 }
 
-// Attempt reconnect with backoff
-async function attemptReconnect(maxAttempts = 5) {
+// Attempt reconnect with exponential backoff (faster than linear)
+async function attemptReconnect(maxAttempts = 10) {
     if (!connectedDevice || !userProvidedAesKey) return;
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
         try {
@@ -392,12 +392,8 @@ async function attemptReconnect(maxAttempts = 5) {
             const service = await server.getPrimaryService(SERVICE_UUID);
             const characteristic = await service.getCharacteristic(CHARACTERISTIC_UUID);
             
-            // Trigger bonding by reading the characteristic
-            try {
-                await characteristic.readValue();
-            } catch (e) {
-                console.log('Bonding/pairing re-initiated during reconnect:', e.message);
-            }
+            // Skip bonding read on reconnect (already bonded) to save time
+            // Only do it on first connection (which is in the connect handler)
             
             await characteristic.startNotifications();
             characteristicRef = characteristic;
@@ -411,7 +407,9 @@ async function attemptReconnect(maxAttempts = 5) {
             console.warn('Reconnect attempt failed', attempt, err);
             // debugFlags.lastError = `reconnect_fail_attempt_${attempt}`;
             // updateDebugUI();
-            await new Promise(r => setTimeout(r, 1000 * attempt)); // linear backoff
+            // Exponential backoff: 100ms, 200ms, 400ms, 800ms, 1600ms, etc. (max 5s)
+            const backoffMs = Math.min(100 * Math.pow(2, attempt - 1), 5000);
+            await new Promise(r => setTimeout(r, backoffMs));
         }
     }
     // debugFlags.lastParseStep = 'reconnect_failed';
