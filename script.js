@@ -2,8 +2,8 @@
 const SERVICE_UUID = "19b10000-e8f2-537e-4f6c-d104768a1214";
 const CHARACTERISTIC_UUID = "19b10001-e8f2-537e-4f6c-d104768a1214";
 
-// NOTE: BLE encryption is handled automatically by the browser/OS when connecting
-// to an encrypted characteristic. No manual decryption is needed in JavaScript.
+// NOTE: BLE encryption is handled via bonding when connecting to an encrypted characteristic.
+// User must provide the encryption key which matches the ESP32's AES_KEY.
 
 let dataLog = []; 
 let isTestActive = false;
@@ -14,6 +14,7 @@ const statusText = document.getElementById('status');
 const postureInstruction = document.getElementById('postureInstruction');
 let connectedDevice = null;
 let characteristicRef = null;
+let userProvidedAesKey = null; // User-provided encryption key (hex format)
 
 // Runtime debug flags (visible overlay) - COMMENTED OUT
 // let debugFlags = { lastRaw: '', lastParseStep: '', lastError: '', receivedCount: 0 };
@@ -68,9 +69,89 @@ function calculateRollingAverages(data) {
     });
 }
 
+// --- 0. Encryption Key Input ---
+function showEncryptionKeyDialog() {
+    return new Promise((resolve) => {
+        const dialogDiv = document.createElement('div');
+        dialogDiv.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;z-index:10000;';
+        
+        const contentDiv = document.createElement('div');
+        contentDiv.style.cssText = 'background:white;padding:30px;border-radius:8px;max-width:500px;box-shadow:0 4px 20px rgba(0,0,0,0.3);';
+        
+        const titleEl = document.createElement('h3');
+        titleEl.textContent = 'Enter Encryption Key';
+        titleEl.style.cssText = 'margin-top:0;margin-bottom:15px;';
+        
+        const instructionsEl = document.createElement('p');
+        instructionsEl.textContent = 'Enter the AES-128 encryption key in hexadecimal format (32 hex characters for 16 bytes). Example: 020701080208010802080B0A0D0C0F0E';
+        instructionsEl.style.cssText = 'margin-bottom:15px;font-size:14px;color:#666;';
+        
+        const inputEl = document.createElement('input');
+        inputEl.type = 'text';
+        inputEl.placeholder = '32 hex characters (no spaces)';
+        inputEl.style.cssText = 'width:100%;padding:10px;border:1px solid #ccc;border-radius:4px;font-family:monospace;margin-bottom:15px;box-sizing:border-box;';
+        
+        const errorEl = document.createElement('div');
+        errorEl.style.cssText = 'color:#dc3545;font-size:13px;margin-bottom:15px;display:none;';
+        
+        const buttonContainer = document.createElement('div');
+        buttonContainer.style.cssText = 'display:flex;gap:10px;justify-content:flex-end;';
+        
+        const cancelBtn = document.createElement('button');
+        cancelBtn.textContent = 'Cancel';
+        cancelBtn.style.cssText = 'padding:10px 20px;background:#6c757d;color:white;border:none;border-radius:4px;cursor:pointer;';
+        cancelBtn.onclick = () => {
+            dialogDiv.remove();
+            resolve(null);
+        };
+        
+        const confirmBtn = document.createElement('button');
+        confirmBtn.textContent = 'Connect';
+        confirmBtn.style.cssText = 'padding:10px 20px;background:#007bff;color:white;border:none;border-radius:4px;cursor:pointer;';
+        confirmBtn.onclick = () => {
+            const keyValue = inputEl.value.trim().toUpperCase();
+            if (!/^[0-9A-F]{32}$/.test(keyValue)) {
+                errorEl.textContent = 'Invalid format! Must be 32 hexadecimal characters.';
+                errorEl.style.display = 'block';
+                return;
+            }
+            dialogDiv.remove();
+            resolve(keyValue);
+        };
+        
+        inputEl.onkeypress = (e) => {
+            if (e.key === 'Enter') confirmBtn.click();
+        };
+        
+        buttonContainer.appendChild(cancelBtn);
+        buttonContainer.appendChild(confirmBtn);
+        
+        contentDiv.appendChild(titleEl);
+        contentDiv.appendChild(instructionsEl);
+        contentDiv.appendChild(inputEl);
+        contentDiv.appendChild(errorEl);
+        contentDiv.appendChild(buttonContainer);
+        
+        dialogDiv.appendChild(contentDiv);
+        document.body.appendChild(dialogDiv);
+        
+        inputEl.focus();
+    });
+}
+
 // --- 1. Bluetooth Connection Logic ---
 document.getElementById('connectBtn').addEventListener('click', async () => {
     try {
+        statusText.innerText = "Status: Asking for encryption key...";
+        
+        // Get encryption key from user
+        const keyHex = await showEncryptionKeyDialog();
+        if (!keyHex) {
+            statusText.innerText = 'Status: Connection cancelled.';
+            return;
+        }
+        
+        userProvidedAesKey = keyHex;
         statusText.innerText = "Status: Searching for Device...";
 
         const device = await navigator.bluetooth.requestDevice({
@@ -89,11 +170,22 @@ document.getElementById('connectBtn').addEventListener('click', async () => {
         });
 
         const server = await device.gatt.connect();
+        statusText.innerText = "Status: Connected! Initiating bonding...";
+        
         const service = await server.getPrimaryService(SERVICE_UUID);
         const characteristic = await service.getCharacteristic(CHARACTERISTIC_UUID);
 
+        // Trigger bonding by reading the characteristic with encryption
+        // This will prompt the user for pairing if not already bonded
+        try {
+            await characteristic.readValue();
+        } catch (e) {
+            // Bonding/pairing prompt may appear here - this is expected
+            console.log('Bonding/pairing initiated:', e.message);
+        }
+        
         await characteristic.startNotifications();
-        statusText.innerText = "Status: Connected. Press 'Start Test' to begin logging data...";
+        statusText.innerText = "Status: Connected and bonded. Press 'Start Test' to begin logging data...";
 
         // attach handler and keep reference
         characteristicRef = characteristic;
@@ -106,15 +198,16 @@ document.getElementById('connectBtn').addEventListener('click', async () => {
 });
         
 
-// AES-128 Decryption Key (MUST match ESP32 key exactly)
-// This is hex format: 00 01 02 03 04 05 06 07 08 09 0A 0B 0C 0D 0E 0F
-const AES_KEY_HEX = "020701080208010802080B0A0D0C0F0E";
-
 // AES-128 ECB decryption using CryptoJS
 function decryptAES128(hexCiphertext) {
     try {
+        if (!userProvidedAesKey) {
+            console.error('AES key not set. User must connect with a key first.');
+            return null;
+        }
+        
         // Parse key and ciphertext as hex
-        const key = CryptoJS.enc.Hex.parse(AES_KEY_HEX);
+        const key = CryptoJS.enc.Hex.parse(userProvidedAesKey);
         const ciphertext = CryptoJS.enc.Hex.parse(hexCiphertext);
         
         // Decrypt using AES ECB mode with PKCS7 padding
@@ -142,6 +235,10 @@ function decryptAES128(hexCiphertext) {
 function handleCharacteristicValueChanged(event) {
     try {
         if (!isTestActive) return; // Only log if test is active
+        if (!userProvidedAesKey) {
+            console.warn('Received data but no encryption key is set');
+            return;
+        }
 
         // Decode BLE data (now encrypted)
         const rawBytes = event.target.value;
@@ -286,7 +383,7 @@ function handleCharacteristicValueChanged(event) {
 
 // Attempt reconnect with backoff
 async function attemptReconnect(maxAttempts = 5) {
-    if (!connectedDevice) return;
+    if (!connectedDevice || !userProvidedAesKey) return;
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
         try {
             // debugFlags.lastParseStep = `reconnect_attempt_${attempt}`;
@@ -294,6 +391,14 @@ async function attemptReconnect(maxAttempts = 5) {
             const server = await connectedDevice.gatt.connect();
             const service = await server.getPrimaryService(SERVICE_UUID);
             const characteristic = await service.getCharacteristic(CHARACTERISTIC_UUID);
+            
+            // Trigger bonding by reading the characteristic
+            try {
+                await characteristic.readValue();
+            } catch (e) {
+                console.log('Bonding/pairing re-initiated during reconnect:', e.message);
+            }
+            
             await characteristic.startNotifications();
             characteristicRef = characteristic;
             characteristic.addEventListener('characteristicvaluechanged', handleCharacteristicValueChanged);
@@ -680,5 +785,3 @@ The results of this test did not meet the diagnostic criteria for POTS. The diag
             canvas.height = origHeight;
         }
 });
-
-
